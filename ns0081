@@ -1,297 +1,296 @@
 #!/bin/sh -x
 #
-# ngsplg - NGS pipeline for genomic sequences
-#            (e.g. exome and target re-sequencing)
+# NAME
+#   ns0081 - make a realigned BAM file from exome FASTQ files
 #
-# usage:
-#   $ cd Documents/
-#   $ mkdir ProjectName
-#   $ cd ProjectName
-#   $ cp -p /mnt/data/Unaligned/Project/*_R[12]_*.fastq.gz ./
-#   $ nohup ngsplg 1> log01.txt 2> log02.txt &
+# SYNOPSIS
+#   ns0081 [-b bait_in_bed] [-d number_of_threads] [-f dir_name] [-h] [-j] \
+#          [-k] [-m sample_name] [-n no_pad_bait_in_bed] [-p size_of_heap] \
+#          [-q minimum_qscore] [-r error_rate_cutadapt] \
+#          [-s shortest_length_considered] [-t threshold_value] \
+#          [-w] [-x] [-y] [-z]
 #
-# Note that ./seq/, ./qc/, ./aln/, ./log/, and ./var/ will be overwritten.
+# DESCRIPTION
+#   This script reads exome FASTQ files and makes a realigned BAM file.
+#   Make a directry using the sample name
+#   and put paired-end FASTQ files in it.
+#   Files ${sample}_R[12]_[014].fastq are also acceptable and used.
+#   The final BAM file is saved in the aln directory.
+#   This script is usually called from ns0101
+#   and this calls ns0070, ns0075, bwa, samtools, gatk, picard, etc.
+#
+# OPTIONS
+#   See below or type ns0081 -h 2> /dev/null in a command line.
+#
+# USAGE
+#   $ mkdir SampleName	# the name of this directory is important
+#   $ cd SampleName/
+#   $ cp -p /mnt/usb/Unaligned/Project/Sample/*_R[12]_*.fastq.gz ./
+#   $ ns0081 -h 2> /dev/null	# check options
+#   $ nohup ns0081 < /dev/null > ns0081.stdout 2> ns0081.stderr &
+#
+# AUTHORS
+#   Coded by Kohji OKAMURA, Ph.D.
+#   Coded by Yoriko Takahashi
+#   Coded by Kumiko Kawasaki
+#   Coded by Takao Yokoyama
+#   Coded by Hiroko Ogata-Kawata, Ph.D.
+#
+# HISTORY
+#   Aug 29, 2012  The first version as ngs_pipeline_mfb
+#   Sep 03, 2012  Rename to ngsplg
+#   Jun 25, 2013  Rename to ns0001.sh
+#   Jul 22, 2013  DepthOfCoverage does not support --num_threads
+#   Jul 26, 2013  Options -b, -d, -h, -k, -p, -s, -t supported
+#   Aug 02, 2013  Add PATH to Java 1.7 for Shirokane1
+#   Aug 20, 2013  To support v5, option -v added
+#   Aug 28, 2013  Usage updated, intermediate files are removed
+#   Sep 11, 2013  intermediate files are removed, Options -a supported
+#   Oct 01, 2013  Rename jf0017 to ns0017
+#   Oct 04, 2013  exception handling for check FASTQ format and sam file size 
+#   Oct 09, 2013  Rename jf0005.pl to ns0005; option -u supported
+#   Oct 11, 2013  Rename jf0010.pl to ns0010
+#   Oct 16, 2013  Rename jf0018 to ns0018
+#   Oct 23, 2013  Variable $reference should be defined after getopts
+#   Oct 29, 2013  Save MarkDuplicates metrics file in aln/
+#   Nov 01, 2013  Making local tmp directry for MarkDuplicates
+#   Nov 01, 2013  Exception handling for check output file of MarkDuplicates
+#   Dec 17, 2013  Leave cutadapt output files
+#   Feb 05, 2014  Use only one of the two external adapters in cutadapt
+#   Feb 13, 2014  Minor changes in messages onto the standard output
+#   Mar 04, 2014  Use the latest versions of bwa , gatk and picard; option -n
+#   Mar 06, 2014  Set PATH to jdk1.7.0_45
+#   Jun 06, 2014  Fix a bug regarding option -b and -n
+#   Jun 12, 2014  Picard 1.109 is used in any case
+#   Aug 25, 2014  Change Java's version and path for HA8000/RS210
+#   Sep 10, 2014  BWA 0.7.10 and GATK 3.2-2 for option -n
+#   Dec 17, 2014  Save GATK stdout and stderr as each log file
+#   Jan 20, 2015  Support option -x for calling ns0010 -x
+#   Feb 06, 2015  Bug fix option -a, it should not accept any values
+#   Mar 04, 2015  Parallize processes of R1 and R2 using wait
+#   Mar 05, 2015  Parallization cancelled due to rather slow performance
+#   Apr 09, 2015  Avoid overwriting sample_R[12]_0.fastq
+#   Apr 23, 2015  Diverge from ns0001 to exploit latest tools
+#   Jun 01, 2015  Set default values for 2 executions per node
+#   Jun 18, 2015  Set path for $baits
+#   Jul 13, 2015  Use dbSNP_20150217.vcf instead of dbSNP_201206.vcf
+#   Jul 28, 2015  Change Picard log file name
+#   Jul 29, 2015  Update from GATK 3.3-0 to 3.4-46
+#   Aug 05, 2015  Handle default and current directories for baits
+#   Aug 06, 2015  Process Agilent QXT adapters using -g or -q
+#   Dec 18, 2015  Employ ns0059 to know the adapter sequences
+#   Dec 20, 2015  Exit when unrecognized option detected
+#   Dec 26, 2015  Employ dbSNP 146, dbSNP_20151104.vcf
+#   Jan 07, 2016  Replace ns0010.pl with ns0064.c to speed up; option -j added
+#   Feb 19, 2016  Check pre-existed FASTQ and try to reuse them
+#   Mar 18, 2016  Employ ns0070 to calculate mapping rate
+#   Mar 22, 2016  Update bwa 0.7.12 to 0.7.13 and samtools 1.2 to 1.3
+#   Mar 23, 2016  Upgrade SureSelect Human All Exon V5 to V6
+#   Mar 24, 2016  Update Picard 1.130 to 2.1.1 and GATK 3.4-46 to 3.5
+#   Mar 24, 2016  Update Java 1.7.0 to 1.8.0; GATK 3.4 to 3.5
+#   Mar 24, 2016  Assign FASTQ pre-process to ns0075
+#   Mar 24, 2016  Add options -q, -t, -w, -y, and -z
+#   Mar 25, 2016  Make a summary file
+#   Mar 28, 2016  Fix a bug regarding nopad_baits
+#   Mar 30, 2016  Add usage description regarding option -n
+#   Mar 31, 2016  Add NexteraRapid_v1.2.bed as bait_files
+#   Apr 01, 2016  Add GATK DepthOfCoverage for nopad_baits
+#   Apr 19, 2016  Renamed as ns0081 from ns0101; remove additional processes
+#   Apr 20, 2016  Leave additional processes in ns0101
+#   Apr 21, 2016  Do not use option -w for ns0075 from this script
+#   Apr 22, 2016  Remove additional processes other thank making a BAM
+#   Apr 23, 2016  Fix a minor bug regarding $optw
+#   May 12, 2016  Add option -f to specify a directory containing *.fastq.gz
+#   Jun 15, 2016  Add option -m to enable users to change the sample name
 
-echo $SHELL
-
-kit=SureSelect
-	# kit=Nextera
-	# kit should be SureSelect, TruSeq, or Nextera
-shortest=36
-hit=unique
-	# hit=multiple
-	# hit should be either unique or multiple
-biol=/usr/local/biol
+export LANG=C
+hus4=/net/au34ib/HUS4
+case $HOSTNAME in
+  au?? ) biol=$hus4/work/biol ;;	# HA8000/RS210
+  *    ) biol=/opt/biol ;;
+esac
+sample=$(basename $PWD)
+threads=8	# default
+keep=0	# default
+heap=16	# default
+shortest=72	# default
+erate=0.09	# default
+qscore=16	# default
+threshold=32	# default
+padding=0	# fixed
+small=4096	# fixed
+optf=''
+optj=''
+optk=''
+optw=''
+optx=''
+opty=''
+optz=''
 reference=$biol/References/hg19/hs37d5.fa
-baits=$biol/References/baits/SureSelect_v4_80Mb.bed
-	# baits=$biol/References/baits/SureSelect_v4_51Mb.bed
-	# baits=$biol/References/baits/baits20120903.bed
-padding=0
-	# Note that Agilent SureSelect BED files have been already
-	# expanded 100 bp from the borders, so padding=100 means
-	# expanding 200 bp.
-project=`basename $PWD`
+baits=$biol/References/baits/SureSelect_v6_58Mb.bed	# default
+dbsnp=$biol/References/hg19/dbSNP_20151104.vcf
+picard=$biol/picard-tools-2.1.1/picard.jar
+gatk=$biol/GenomeAnalysisTK-3.5/GenomeAnalysisTK.jar
 
-export	LANG=C
-date 1>&2	# from stdout to stderr
-rm -fr log/
-mkdir log
+while getopts "b:d:f:hjkm:n:p:q:r:s:t:wxyz" opt
+do
+  case $opt in
+    b )  baits=$OPTARG ;;
+    d )  threads=$OPTARG ;;
+    f )  optf="-f $OPTARG" ;;
+    h )  echo 'Usage: nohup ns0081    # this is usually called from ns0101
+         -b: name of the bait file (default: SureSelect_v6_58Mb.bed)
+         -d: number of threads (default: 8)
+         -f: specify a directory containing *.fastq.gz
+         -h: print this help message
+         -j: process non-Illumina FASTQ, such as SRA
+         -k: keep intermediate files (default: delete them)
+         -m: sample name (default: name of the current directory)
+         -n: name of no-pad bait file, but refrain from using this option
+         -p: size of Java heap region in GB (default: 16)
+         -q: minimum base quality score to be considered (default: 16)
+         -r: maximum allowed error rate in cutadapt (default: 0.09)
+         -s: minimal length in bp to be retained (default: 72)
+         -t: threshold value for detection of adapters (default: 32)
+         -w: gzip seq/*_R[12]_4.fastq
+         -x: avoid checking read length (default: not avoid)
+         -y: gzip seq/*_R[12]_1.fastq
+         -z: gzip seq/*_R[12]_0.fastq'
+         exit ;;
+    j )  optj='-j' ;;
+    k )  keep=1; optk='-k' ;;
+    m )  sample=$OPTARG ;;
+    n )  nopad_baits=$OPTARG ;;	# not used here, but in ns0101
+    p )  heap=$OPTARG ;;
+    q )  qscore=$OPTARG ;;
+    r )  erate=$OPTARG ;;
+    s )  shortest=$OPTARG ;;
+    t )  threshold=$OPTARG ;;
+    w )  optw='-w' ;;
+    x )  optx='-x' ;;
+    y )  opty='-y' ;;
+    z )  optz='-z' ;;
+    * )  echo Unrecognized option detected 1>&2; exit 10 ;;
+  esac
+done
 
-ls -l *_R1_*.fastq.gz 1>&2
-ls -l *_R2_*.fastq.gz 1>&2
-
-gzip -d *_R1_*.fastq.gz
-gzip -d *_R2_*.fastq.gz
-
-cat *_R1_*.fastq > ${project}_R1_0.fastq
-cat *_R2_*.fastq > ${project}_R2_0.fastq
-
-date 1>&2
-rm -fr seq/
-mkdir seq/
-
-mv ${project}_R1_0.fastq ${project}_R2_0.fastq seq/
-
-# for fastq in *_R[12]_*.fastq
-# do
-#   gzip $fastq
-# done
-# mv -i *_R[12]_*.fastq.gz seq/
-
-date 1>&2
-cd seq/
-
-# rm -fr ../qc/
-# mkdir ../qc
-
-# $biol/FastQC/fastqc --outdir ../qc ¥
-#   ${project}_R1_0.fastq ${project}_R2_0.fastq 1>&2
-
-## Check FASTQ
-date 1>&2
-$biol/NGS/jf0010.pl ¥
-  -a ${project}_R1_0.fastq -b ${project}_R2_0.fastq ¥
-  -c ${project}_R1_1.fastq -d ${project}_R2_1.fastq -e ${project}_R3_1.fastq
-date 1>&2
-gzip ${project}_R1_0.fastq
-gzip ${project}_R2_0.fastq
-
-#### Trimmomatic
-date 1>&2
-$biol/NGS/make_adaptor $kit
-  if [ $? -ne 0 ]; then	# check the exit status of the previous command
-    rm -f adaptor.fa
-    cd ../
-    exit
-  fi
-java -classpath $biol/Trimmomatic-0.22/trimmomatic-0.22.jar ¥
-  org.usadellab.trimmomatic.TrimmomaticPE -threads 2 -phred33 ¥
-  -trimlog ../log/log03.txt ${project}_R1_1.fastq ${project}_R2_1.fastq ¥
-  ${project}_R1_2.fastq ${project}_R3_2.fastq ¥
-  ${project}_R2_2.fastq ${project}_R4_2.fastq ¥
-  ILLUMINACLIP:adaptor.fa:1:40:10 LEADING:8 TRAILING:8 SLIDINGWINDOW:8:16 ¥
-  MINLEN:$shortest 1>&2
-rm -f adaptor.fa
-
-#### compress sequence files
-date 1>&2
-# gzip ${project}_R1_1.fastq ${project}_R2_1.fastq ${project}_R3_1.fastq
-# gzip ${project}_R3_2.fastq ${project}_R4_2.fastq
-mv ${project}_R1_2.fastq ${project}_R1.fastq
-mv ${project}_R2_2.fastq ${project}_R2.fastq
-# gzip ${project}_R?_?.fastq
-
-#### BWA aln
-date 1>&2
-rm -fr ../aln/
-mkdir ../aln
-$biol/bwa-0.6.2/bwa aln -t 2 $reference ¥
-  ${project}_R1.fastq -f ../aln/${project}_R1.sai ¥
-  1> ../log/log04.txt 2> ../log/log05.txt
-$biol/bwa-0.6.2/bwa aln -t 2 $reference ¥
-  ${project}_R2.fastq -f ../aln/${project}_R2.sai ¥
-  1> ../log/log06.txt 2> ../log/log07.txt
-
-#### BWA sampe
-date 1>&2
-$biol/bwa-0.6.2/bwa sampe -n 4 -N 8 -a 400 -o 80000 ¥
-  -r "@RG¥tID:MFB¥tSM:${project}¥tPL:Illumina" ¥
-  -P -f ../aln/${project}.sam ¥
-  $reference ¥
-  ../aln/${project}_R1.sai ../aln/${project}_R2.sai ¥
-  ${project}_R1.fastq ${project}_R2.fastq ¥
-  1> ../log/log08.txt 2> ../log/log09.txt
-
-#### select unique hits and SAMtools
-date 1>&2
-cd ../aln/
-if [ $hit = multiple ]; then
-  cp -p ${project}.sam ${project}_1.sam
+date
+phc1=`echo $baits | cut -c 1`
+	# bait file should be in ./ or $biol/References/baits/,
+	# otherwise specified with an absolute path
+if [ $phc1 = '/' ]; then
+  :
 else
-  $biol/NGS/jf0005.pl ${project}.sam > ${project}_1.sam
+  if [ -f $PWD/$baits ]; then
+    baits=$PWD/$baits
+  else
+    baits=$biol/References/baits/$baits
+  fi
 fi
-$biol/samtools-0.1.18/samtools view -bS ${project}_1.sam ¥
-  1> ${project}_0.bam 2> ../log/log10.txt
-$biol/samtools-0.1.18/samtools sort ${project}_0.bam ¥
-  ${project}_1 1> ../log/log11.txt 2> ../log/log12.txt
+if [ -f $baits ]; then
+  :
+else
+  echo No such file: $baits \(check option -b\) 1>&2
+  exit 11
+fi
+
+rm -fr log/ seq/ aln/	# remove old files and directories forcefully
+mkdir log seq aln	# make new directories to store files
+
+#### FASTQ pre-process
+export PATH=$biol/NGS:$PATH
+ns0075 $optf $optj $optk -p $sample -q $qscore -r $erate -s $shortest \
+  -t $threshold $optx $opty $optz > ${sample}.counts
+cd seq/
+mv ../${sample}.counts ./
+date
+
+#### BWA-MEM
+export PATH=$biol/bwa-0.7.13:$biol/samtools-1.3:$PATH
+bwa mem -t $threads -P -R "@RG\tID:MFB\tSM:${sample}\tPL:Illumina" -a -M \
+  $reference ${sample}_R1_4.fastq ${sample}_R2_4.fastq \
+  > ../aln/${sample}.sam 2> ../log/bwa_mem.stderr
+size=`ls -l ../aln/${sample}.sam | awk '{ print $5 }'`
+if [ $size -le $small ]; then
+  echo Error: alignment file too small 1>&2
+  exit 12
+fi
+date
+
+#### SAMtools
+cd ../aln/
+samtools view -o ${sample}_0.bam -bS ${sample}.sam 2> ../log/samtools_v.stderr
+samtools sort -o ${sample}_1.bam -T ${sample}_sorting ${sample}_0.bam \
+  2> ../log/samtools_s.stderr
+ns0070 ${sample}.sam > ${sample}.mapped
+if [ $keep -eq 0 ]; then
+  rm -f ${sample}.sam ${sample}_0.bam
+fi
 
 #### Picard MarkDuplicates
-date 1>&2
-java -Xmx6G -jar $biol/picard-tools-1.83/MarkDuplicates.jar ¥
-  ASSUME_SORTED=true REMOVE_DUPLICATES=true ¥
-  INPUT=${project}_1.bam OUTPUT=${project}_2.bam ¥
-  METRICS_FILE=../log/log13.txt VALIDATION_STRINGENCY=LENIENT ¥
-  1> ../log/log14.txt 2> ../log/log15.txt
-$biol/samtools-0.1.18/samtools index ${project}_2.bam
+export PATH=$hus4/usr/java/jdk1.8.0_77/bin:$PATH
+rm -fr tmp/; mkdir tmp
+java -Xmx${heap}g -Djava.io.tmpdir=./tmp -jar $picard MarkDuplicates \
+  ASSUME_SORTED=true REMOVE_DUPLICATES=true INPUT=${sample}_1.bam \
+  OUTPUT=${sample}_2.bam METRICS_FILE=${sample}.metrics \
+  VALIDATION_STRINGENCY=LENIENT \
+  > ../log/picard_md.stdout 2> ../log/picard_md.stderr
+samtools index ${sample}_2.bam ${sample}_2.bai
+if [ $keep -eq 0 ]; then
+  rm -f ${sample}_1.bam
+fi
 
 #### GATK RealignerTargetCreator
-date 1>&2
-java -Xmx6G -jar $biol/GenomeAnalysisTK-2.3-9-ge5ebf34/GenomeAnalysisTK.jar ¥
-  --analysis_type RealignerTargetCreator -R $reference ¥
-  --input_file ${project}_2.bam --known $biol/References/hg19/indels.vcf ¥
-  --intervals $baits --interval_padding $padding -o ${project}.intervals
+java -Xmx${heap}g -Djava.io.tmpdir=./tmp -jar $gatk \
+  --analysis_type RealignerTargetCreator \
+  --num_threads $threads --reference_sequence $reference \
+  --input_file ${sample}_2.bam --known $biol/References/hg19/indels.vcf \
+  --intervals $baits --interval_padding $padding --out ${sample}.intervals \
+  > ../log/gatk_rt.stdout 2> ../log/gatk_rt.stderr
 	# bait file should not be in hg19 but in b37
-ls -l ${project}.intervals
 
 #### GATK IndelRealigner
-date 1>&2
-rm -fr tmp/
-mkdir tmp
-java -Xmx6G -Djava.io.tmpdir=./tmp ¥
-  -jar $biol/GenomeAnalysisTK-2.3-9-ge5ebf34/GenomeAnalysisTK.jar ¥
-  --analysis_type IndelRealigner -R $reference ¥
-  --input_file ${project}_2.bam -log ../log/log16.txt ¥
-  -targetIntervals ${project}.intervals -o ${project}_3.bam ¥
-  1> ../log/log17.txt 2> ../log/log18.txt
+java -Xmx${heap}g -Djava.io.tmpdir=./tmp -jar $gatk \
+  --analysis_type IndelRealigner --reference_sequence $reference \
+  --filter_bases_not_stored --input_file ${sample}_2.bam \
+  --targetIntervals ${sample}.intervals --out ${sample}_3.bam \
+  > ../log/gatk_ir.stdout 2> ../log/gatk_ir.stderr
+if [ $keep -eq 0 ]; then
+  rm -f ${sample}_2.bam ${sample}_2.bai ${sample}.intervals
+fi
 
-#### Picard FixMateInformation; SAMtools
-date 1>&2
-java -Xmx6G -jar $biol/picard-tools-1.83/FixMateInformation.jar ¥
-  INPUT=${project}_3.bam SO=coordinate VALIDATION_STRINGENCY=SILENT ¥
-  TMP_DIR=./tmp 1> ../log/log19.txt 2> ../log/log20.txt
-	# ${project}_3.bam is changed
-$biol/samtools-0.1.18/samtools index ${project}_3.bam
-rm ${project}_3.bai
-rm -fr tmp
+#### Picard FixMateInformation
+java -Xmx${heap}g -Djava.io.tmpdir=./tmp -jar $picard FixMateInformation \
+  INPUT=${sample}_3.bam SO=coordinate VALIDATION_STRINGENCY=SILENT \
+  > ../log/picard_fm.stdout 2> ../log/picard_fm.stderr
+	# ${sample}_3.bam is changed
+samtools index ${sample}_3.bam ${sample}_3.bai
 
 #### GATK BaseRecalibrator and PrintReads; SAMtools
-date 1>&2
-java -Xmx6G -jar $biol/GenomeAnalysisTK-2.3-9-ge5ebf34/GenomeAnalysisTK.jar ¥
-  --analysis_type BaseRecalibrator --input_file ${project}_3.bam ¥
-  -R $reference ¥
-  --knownSites $biol/References/hg19/dbSNP_201206.vcf -log ../log/log21.txt ¥
-  --covariate ContextCovariate --out recal_data.grp
-java -Xmx6G -jar $biol/GenomeAnalysisTK-2.3-9-ge5ebf34/GenomeAnalysisTK.jar ¥
-  --analysis_type PrintReads -R $reference ¥
-  --input_file ${project}_3.bam ¥
-  -BQSR recal_data.grp --out ${project}.bam
-	# ${project}.bai is simultaniously created.
-
-#### GATK DepthOfCoverage
-date 1>&2
-java -Xmx6G -jar $biol/GenomeAnalysisTK-2.3-9-ge5ebf34/GenomeAnalysisTK.jar ¥
-  --analysis_type DepthOfCoverage -R $reference --input_file ${project}.bam ¥
-  -o ${project} --intervals $baits --interval_padding $padding ¥
-  -omitBaseOutput -ct 10 -ct 20 -ct 30 -ct 40
-cd ../
-
-#### GATK UnifiedGenotyper and VariantFiltration for SNV
-date 1>&2
-rm -fr var/
-mkdir var
-cd var/
+java -Xmx${heap}g -Djava.io.tmpdir=./tmp -jar $gatk \
+  --analysis_type BaseRecalibrator \
+  --num_cpu_threads_per_data_thread $threads \
+  --input_file ${sample}_3.bam --reference_sequence $reference \
+  --knownSites ${dbsnp} \
+  --covariate ContextCovariate --out recal_data.grp \
+  > ../log/gatk_br.stdout 2> ../log/gatk_br.stderr
+java -Xmx${heap}g -Djava.io.tmpdir=./tmp -jar $gatk \
+  --analysis_type PrintReads \
+  --reference_sequence $reference --input_file ${sample}_3.bam \
+  -BQSR recal_data.grp --out ${sample}.bam \
+  > ../log/gatk_pr.stdout 2> ../log/gatk_pr.stderr
+	# ${sample}.bai is simultaniously created.
 rm -fr tmp/
-mkdir tmp
-java -Djava.io.tmpdir=./tmp -Xmx6G ¥
-  -jar $biol/GenomeAnalysisTK-2.3-9-ge5ebf34/GenomeAnalysisTK.jar ¥
-  --analysis_type UnifiedGenotyper -R $reference ¥
-  --input_file ../aln/${project}.bam --num_threads 4 ¥
-  --intervals $baits --interval_padding $padding ¥
-  --genotype_likelihoods_model SNP --out ${project}_0.vcf ¥
-  --annotation AlleleBalance --annotation DepthOfCoverage ¥
-  --standard_min_confidence_threshold_for_calling 40 ¥
-  --standard_min_confidence_threshold_for_emitting 40 ¥
-  --downsample_to_coverage 400
-java -Djava.io.tmpdir=./tmp -Xmx6G ¥
-  -jar $biol/GenomeAnalysisTK-2.3-9-ge5ebf34/GenomeAnalysisTK.jar ¥
-  --analysis_type VariantFiltration -R $reference ¥
-  -V ${project}_0.vcf --out ${project}_1.vcf --clusterWindowSize 10 ¥
-  --filterExpression "QUAL < 30.0 || QD < 5.0" ¥
-                                             --filterName "QLflt" ¥
-  --filterExpression "QD < 2.0"              --filterName "QDflt" ¥
-  --filterExpression "MQ < 40.0"             --filterName "MQflt" ¥
-  --filterExpression "FS > 60.0"             --filterName "FSflt" ¥
-  --filterExpression "HaplotypeScore > 13.0" --filterName "HTflt"
-
-#### GATK UnifiedGenotyper and VariantFiltration for indel
-date 1>&2
-java -Djava.io.tmpdir=./tmp -Xmx6G ¥
-  -jar $biol/GenomeAnalysisTK-2.3-9-ge5ebf34/GenomeAnalysisTK.jar ¥
-  --analysis_type UnifiedGenotyper -R $reference ¥
-  --input_file ../aln/${project}.bam --num_threads 4 ¥
-  --intervals $baits --interval_padding $padding ¥
-  --genotype_likelihoods_model INDEL --out ${project}_2.vcf ¥
-  --annotation AlleleBalance --annotation DepthOfCoverage ¥
-  --standard_min_confidence_threshold_for_calling 40 ¥
-  --standard_min_confidence_threshold_for_emitting 40 ¥
-  --downsample_to_coverage 400
-java -Djava.io.tmpdir=./tmp -Xmx6G ¥
-  -jar $biol/GenomeAnalysisTK-2.3-9-ge5ebf34/GenomeAnalysisTK.jar ¥
-  --analysis_type VariantFiltration -R $reference ¥
-  -V ${project}_2.vcf --out ${project}_3.vcf ¥
-  --filterExpression "MQ0 >= 4 && ((MQ0 / (1.0 * DP)) > 0.1)" ¥
-                                              --filterName "MDflt" ¥
-  --filterExpression "QUAL < 10"              --filterName "QLflt" ¥
-  --filterExpression "QD < 2.0"               --filterName "QDflt" ¥
-  --filterExpression "FS > 200.0"             --filterName "FSflt"
-
-#### GATK CombineVariants
-date 1>&2
-java -Djava.io.tmpdir=./tmp -Xmx6G ¥
-  -jar $biol/GenomeAnalysisTK-2.3-9-ge5ebf34/GenomeAnalysisTK.jar ¥
-  --analysis_type CombineVariants -R $reference ¥
-  --variant:SNV ${project}_1.vcf --variant:INDEL ${project}_3.vcf ¥
-  --filteredAreUncalled --genotypemergeoption PRIORITIZE ¥
-  --rod_priority_list SNV,INDEL --out ${project}_4.vcf
-rm -fr tmp
-
-#### snpEff
-date 1>&2
-cp -p $biol/snpEff_3_1/snpEff.config ./
-java -Xmx6G -jar $biol/snpEff_3_1/snpEff.jar eff -v -i vcf -o vcf ¥
-  GRCh37.69 ${project}_4.vcf > ${project}.vcf
-rm snpEff.config
-
-#### IGVTools
-$biol/IGVTools/igvtools index ${project}.vcf 1> ../log/log23.txt ¥
-  2> ../log/log24.txt
-mv -f igv.log ../log/log25.txt
+if [ $keep -eq 0 ]; then
+  rm -f ${sample}_3.ba* recal_data.grp
+fi
+if [ -z $optw ]; then
+  :
+elif [ $optw = '-w' ]; then
+  cd ../seq/
+  gzip ${sample}_R?_4.fastq
+fi
 cd ../
 
-$biol/NGS/mv_logs &
-date 1>&2
-
-# log/log01.txt	ngsplg stdout
-# log/log02.txt	ngsplg stderr
-# log/log03.txt	Trimmomatic log
-# log/log04.txt	bwa aln R1 stdout
-# log/log05.txt	bwa aln R1 stderr
-# log/log06.txt	bwa aln R2 stdout
-# log/log07.txt	bwa aln R2 stderr
-# log/log08.txt	bwa sampe stdout
-# log/log09.txt	bwa sampe stderr
-# log/log10.txt	samtools view stderr
-# log/log11.txt	samtools sort stdout
-# log/log12.txt	samtools sort stderr
-# log/log13.txt	picard metrics file
-# log/log14.txt	picard stdout
-# log/log15.txt	picard stderr
-# log/log16.txt	GATK IndelRealigner log
-# log/log17.txt	GATK IndelRealigner stdout
-# log/log18.txt	GATK IndelRealigner stderr
-# log/log19.txt	picard FixMateInformation stdout
-# log/log20.txt	picard FixMateInformation stderr
-# log/log21.txt	GATK BaseRecalibrator log
-# log/log23.txt	IGVTools stdout
-# log/log24.txt	IGVTools stderr
-# log/log25.txt	IGVTools log
+date
+exit
