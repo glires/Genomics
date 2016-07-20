@@ -1,0 +1,296 @@
+#!/bin/sh -x
+#
+# NAME
+#   ns0082 - execute multi-sample calling
+#
+# SYNOPSIS
+#   ns0082 -h > /dev/null
+#   ns0082 [-a padding_size_in_bp] [-b bait_file] [-c] [-d num_of_threads] \
+#          [-e] [-h 2> /dev/null] [-k] [-l input_bams_list] \
+#          [-p size_of_heap_in_GB] [-r project_name]
+#
+# USAGE
+#   $ mkdir ProjectName
+#   $ cd ProjectName/
+#   $ vi input_bams.list
+#	# prepare a list of bam files with their full paths
+#   $ nohup ns0082 -b baits.bed -c -d 8 -k -p 24 \
+#       < /dev/null 1> ns0082.stdout 2> ns0082.stderr &
+#
+# DESCRIPOTION
+#   This script performs a multi-sample calling by reading BAM files.
+#   HaplotypeCaller is employed instead of UnifiedGenotyper
+#   if option -c is specified.
+#
+# OPTIONS
+#   See below or type "ns0082 -h 2> /dev/null" in a command line.
+#
+# AUTHORS
+#   Coded by Kohji OKAMURA, Ph.D.
+#   Coded by Yoriko Takahashi
+#   Coded by Kumiko Kawasaki
+#   Coded by Takao Yokoyama
+#
+# HISTORY
+#   Jun 18, 2013  The first version as ns0004_ty.pl by Yoriko
+#   Jul 01, 2013  Renamed to multisample_calling, including filtering
+#   Jul 04, 2013  Renamed to ns0002.sh by Kohji
+#   Jul 08, 2013  Option -k supported by Yoriko
+#   Jul 10, 2013  Rename ns0004_ty.pl to ns0004.pl
+#   Jul 18, 2013  Set threads for GATK CombineVariants
+#   Jul 25, 2013  Options -b, -d, -h, -p, and -t supported by Kohji
+#   Jul 26, 2013  Options -b for ns0004.pl supported by Kohji
+#   Aug 02, 2013  Add PATH to Java 1.7 for Shirokane1
+#   Aug 20, 2013  To support v5, option -v added
+#   Sep 11, 2013  Usage updated
+#   Nov 13, 2013  Usage updated
+#   Dec 18, 2013  HGVD added by Kumiko
+#   Dec 26, 2013  Rename ns0004.pl to ns0004
+#   Feb 13, 2014  Minor changes in messages onto the starndard output
+#   Feb 26, 2014  Minor changes in inputfiles option
+#   Mar 10, 2014  Use the latest vergion of GATK; option -n supported
+#   Mar 11, 2014  Change DepthOfCoverage to Coverage in GATK
+#   May 02, 2014  A bug after adding -n option ($gatk at Shirokane1)
+#   Jun 12, 2014  Change defalt for SureSelect (-v 5 -t 50)
+#   Jul 02, 2014  Set $biol from $HOSTNAME
+#   Jul 18, 2014  Java 7 for HA8000; ns0029, ns0030, ns0031, ns0032
+#   Aug 25, 2014  Change Java's version and path for HA8000/RS210
+#   Sep 09, 2014  GATK 3.2 when option -n given
+#   Oct 03, 2014  Add ns0039 at the end; use stderr for gatk and annovar
+#   Nov 17, 2014  Use stdout for gatk
+#   Mar 11, 2015  Add description of option -n in the help message
+#   May 20, 2015  Use option -b to specify a bait file insted of $biol
+#   Jun 11, 2015  Diverge from ns0002
+#   Jul 13, 2015  Use dbSNP_20150217.vcf instead of dbSNP_201206.vcf
+#   Jul 29, 2015  Update from GATK 3.3-0 to 3.4-46
+#   Jul 30, 2015  Use HaplotypeCaller instead of UnifiedGenotyper
+#   Aug 05, 2015  Handle default and current directories for baits
+#   Aug 06, 2015  Pipeline VariantFiltration and others with new condition
+#   Oct 06, 2015  Call ns0026 to execute ANNOVAR
+#   Dec 28, 2015  Employ dbSNP 146 (dbSNP_20151104.vcf)
+#   Jan 14, 2016  Option -c and -e added; call UnifiedGenotyper by default
+#   Mar 30, 2016  Employ ns0076 instead of ns0026 (ns0074 instead of ns0004)
+#   Mar 30, 2016  Upgrade Java 7 to 8; update GATK 3.4 to 3.5
+#   Mar 30, 2016  Upgrade SureSelect Human All Exon V5 to V6
+#   Apr 15, 2016  Diverged from ns0102
+#   Apr 16, 2016  Use shell variables in the help message
+#   Apr 18, 2016  Fix a bug regarding $baits
+#   Jul 20, 2016  Add option -r to change the name of the project
+
+case $HOSTNAME in
+  au?? ) biol=/net/au34ib/HUS4/work/biol ;;     # HA8000/RS210
+  *    ) biol=/opt/biol ;;
+esac
+project=`basename $PWD`
+
+export LANG=C
+export PATH=$biol/NGS:/net/au34ib/HUS4/usr/java/jdk1.8.0_77/bin:$PATH
+
+## set some default values
+bams=input_bams.list
+keep=0	# does not keep transient files
+hc=0	# HaplotypeCaller or UnifiedGenotyper
+shuffle=1
+threads=16
+heap=32
+baits=SureSelect_v6_58Mb.bed
+dbsnp=$biol/References/hg19/dbSNP_20151104.vcf
+reference=$biol/References/hg19/hs37d5.fa
+gatk=$biol/GenomeAnalysisTK-3.5/GenomeAnalysisTK.jar
+padding=0
+tmp=tmp
+
+while getopts "a:b:cd:ehkl:p:r:" opt
+do
+  case $opt in
+    a )  padding=$OPTARG ;;
+    b )  baits=$OPTARG ;;
+    c )  hc=1 ;;
+    d )  threads=$OPTARG ;;
+    e )  shuffle=0 ;;
+    h )  echo "Usage: ns0082 > ns0082.stdout 2> ns0082.stderr
+          -a: amount of padding in bp (default: $padding)
+          -b: name of the bait file (default: $baits)
+          -c: use HaplotypeCaller instead of UnifiedGenotyper
+          -d: number of threads (default: $threads)
+          -e: evade shuffling control genotypes
+          -h: print this help message
+          -k: keep intermediate files (default: delete them)
+          -l: input file name (default: $bams)
+          -p: size of Java heap region in GB (default: $heap)
+          -r: name of the project (default: $project)"
+         exit ;;
+    k )  keep=1 ;;
+    l )  bams=$OPTARG ;;
+    p )  heap=$OPTARG ;;
+    r )  project=$OPTARG ;;
+    * )  echo Unrecognized option detected 1>&2; exit 2 ;;
+  esac
+done
+
+phc1=`echo $baits | cut -c 1`
+if [ $phc1 = '/' ]; then
+  :
+elif [ -f $PWD/$baits ]; then
+  baits=$PWD/$baits
+else
+  baits=$biol/References/baits/$baits
+fi
+if [ -f $baits ]; then
+  :
+else
+  echo No such file: $baits \(check option -b \)
+  exit 1
+fi
+
+rm -fr $tmp/ log/
+mkdir $tmp log
+
+if [ $hc -eq 1 ]; then
+  java -Djava.io.tmpdir=$tmp -Xmx${heap}g -jar $gatk \
+    --analysis_type HaplotypeCaller \
+    --reference_sequence $reference \
+    --num_cpu_threads_per_data_thread $threads \
+    --input_file $bams \
+    --out ${project}_0.vcf \
+    --dbsnp $dbsnp \
+    --standard_min_confidence_threshold_for_calling 40 \
+    --standard_min_confidence_threshold_for_emitting 40 \
+    --intervals $baits \
+    --interval_padding $padding \
+    > log/gatk_hc.stdout 2> log/gatk_hc.stderr
+  java -Djava.io.tmpdir=$tmp -Xmx${heap}g -jar $gatk \
+    --analysis_type SelectVariants \
+    --reference_sequence $reference \
+    --variant ${project}_0.vcf \
+    --selectTypeToInclude SNP \
+    --out ${project}_1.vcf \
+    > log/gatk_sv.stdout 2> log/gatk_sv.stderr
+  java -Djava.io.tmpdir=$tmp -Xmx${heap}g -jar $gatk \
+    --analysis_type SelectVariants \
+    --reference_sequence $reference \
+    --variant ${project}_0.vcf \
+    --selectTypeToInclude INDEL \
+    --out ${project}_2.vcf \
+    >> log/gatk_sv.stdout 2>> log/gatk_sv.stderr
+  java -Djava.io.tmpdir=$tmp -Xmx${heap}g -jar $gatk \
+    --analysis_type VariantFiltration \
+    --reference_sequence $reference \
+    --variant ${project}_1.vcf \
+    --out ${project}_3.vcf \
+    --filterExpression "QD < 2.0"               --filterName "QD_filter" \
+    --filterExpression "MQ < 40.0"              --filterName "MQ_filter" \
+    --filterExpression "FS > 60.0"              --filterName "FS_filter" \
+    --filterExpression "HaplotypeScore > 13.0"  --filterName "HS_filter" \
+    --filterExpression "MQRankSum < -12.5"      --filterName "MR_filter" \
+    --filterExpression "ReadPosRankSum < -8.0"  --filterName "RR_filter" \
+    > log/gatk_vf.stdout 2> log/gatk_vf.stderr
+  java -Djava.io.tmpdir=$tmp -Xmx${heap}g -jar $gatk \
+    --analysis_type VariantFiltration \
+    --reference_sequence $reference \
+    --variant ${project}_2.vcf \
+    --out ${project}_4.vcf \
+    --filterExpression "QD < 2.0"               --filterName "QD_filter" \
+    --filterExpression "ReadPosRankSum < -20.0" --filterName "RR_filter" \
+    --filterExpression "FS > 200.0"             --filterName "FS_filter" \
+    >> log/gatk_vf.stdout 2>> log/gatk_vf.stderr
+  java -Djava.io.tmpdir=$tmp -Xmx${heap}g -jar $gatk \
+    --analysis_type CombineVariants \
+    --num_threads $threads \
+    --reference_sequence $reference \
+    --variant:SNP ${project}_3.vcf \
+    --variant:INDEL ${project}_4.vcf \
+    --genotypemergeoption PRIORITIZE \
+    --rod_priority_list SNP,INDEL \
+    --out ${project}_5.vcf \
+    > log/gatk_cv.stdout 2> log/gatk_cv.stderr
+else
+  java -Djava.io.tmpdir=$tmp -Xmx${heap}g -jar $gatk \
+    --analysis_type UnifiedGenotyper \
+    --reference_sequence $reference \
+    --num_threads $threads \
+    --input_file $bams \
+    --out ${project}_1.vcf \
+    --dbsnp $dbsnp \
+    --genotype_likelihoods_model SNP \
+    --standard_min_confidence_threshold_for_calling 40 \
+    --standard_min_confidence_threshold_for_emitting 40 \
+    --downsample_to_coverage 400 \
+    --intervals $baits \
+    --interval_padding $padding \
+    > log/gatk_ug.stdout 2> log/gatk_ug.stderr
+  java -Djava.io.tmpdir=$tmp -Xmx${heap}g -jar $gatk \
+    --analysis_type UnifiedGenotyper \
+    --reference_sequence $reference \
+    --num_threads $threads \
+    --input_file $bams \
+    --out ${project}_2.vcf \
+    --dbsnp $dbsnp \
+    --genotype_likelihoods_model INDEL \
+    --standard_min_confidence_threshold_for_calling 40 \
+    --standard_min_confidence_threshold_for_emitting 40 \
+    --downsample_to_coverage 400 \
+    --intervals $baits \
+    --interval_padding $padding \
+    >> log/gatk_ug.stdout 2>> log/gatk_ug.stderr
+  java -Djava.io.tmpdir=$tmp -Xmx${heap}g -jar $gatk \
+    --analysis_type VariantFiltration \
+    --reference_sequence $reference \
+    --variant ${project}_1.vcf \
+    --out ${project}_3.vcf \
+    --clusterWindowSize 10 \
+    --filterExpression "QUAL < 30.0 || QD < 5.0" \
+                                               --filterName "QLflt" \
+    --filterExpression "QD < 2.0"              --filterName "QDflt" \
+    --filterExpression "MQ < 40.0"             --filterName "MQflt" \
+    --filterExpression "FS > 60.0"             --filterName "FSflt" \
+    --filterExpression "HaplotypeScore > 13.0" --filterName "HTflt" \
+    > log/gatk_vf.stdout 2> log/gatk_vf.stderr
+  java -Djava.io.tmpdir=$tmp -Xmx${heap}g -jar $gatk \
+    --analysis_type VariantFiltration \
+    --reference_sequence $reference \
+    --variant ${project}_2.vcf \
+    --out ${project}_4.vcf \
+    --filterExpression "MQ0 >= 4 && ((MQ0 / (1.0 * DP)) > 0.1)" \
+                                               --filterName "MDflt" \
+    --filterExpression "QUAL < 10"             --filterName "QLflt" \
+    --filterExpression "QD < 2.0"              --filterName "QDflt" \
+    --filterExpression "FS > 200.0"            --filterName "FSflt" \
+    >> log/gatk_vf.stdout 2>> log/gatk_vf.stderr
+  java -Djava.io.tmpdir=$tmp -Xmx${heap}g -jar $gatk \
+    --analysis_type CombineVariants \
+    --num_threads $threads \
+    --reference_sequence $reference \
+    --variant:SNV ${project}_3.vcf \
+    --variant:INDEL ${project}_4.vcf \
+    --genotypemergeoption PRIORITIZE \
+    --rod_priority_list SNV,INDEL \
+    --out ${project}_5.vcf \
+    > log/gatk_cv.stdout 2> log/gatk_cv.stderr
+fi
+java -Djava.io.tmpdir=$tmp -Xmx${heap}g -jar $gatk \
+  --analysis_type VariantAnnotator \
+  --reference_sequence $reference \
+  --dbsnp $dbsnp \
+  --variant ${project}_5.vcf \
+  --out ${project}_6.vcf \
+  > log/gatk_va.stdout 2> log/gatk_va.stderr
+
+rm -fr $tmp/
+
+#### Delete temporary files
+rm ${project}_6.vcf.idx
+if [ $shuffle -eq 0 ]; then
+  mv ${project}_6.vcf ${project}.vcf
+else
+  ns0060 ${project}_6.vcf > ${project}.vcf
+  if [ $? -ne 0 ]; then
+    mv -f ${project}_6.vcf ${project}.vcf
+  fi
+fi
+if [ $keep -eq 0 ]; then
+  ls -l --time-style=long-iso *.vcf*
+  rm -f *_[0-6].vcf*
+fi
+
+exit
