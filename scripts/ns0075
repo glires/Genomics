@@ -1,0 +1,335 @@
+#!/bin/sh -x
+#
+# NAME
+#   ns0075 - pre-process paired-end Illumina FASTQ files
+#
+# SYNOPSIS
+#   ns0075 [-c] [-f dir_name] [-g] [-h] [-i] [-j] [-k] \
+#          [-m multiple] [-o] [-p sample_name] \
+#          [-q minimum_quality_score] [-r error_rate_cutadapt] \
+#          [-s shortest_length_considered] [-t threshold] \
+#          [-u adapter_number] [-w] [-x] [-y] [-z]
+#
+# EXAMPLES
+#   $ mkdir SampleName/	# name of this directory is important
+#   $ cd SampleName/
+#   $ cp -p /mnt/usb/Unaligned/Project/Sample/*_R[12]_*.fastq.gz ./
+#   $ which ns0075	# probably in /net/au34ib/HUS4/work/biol/NGS/
+#   $ ns075 -h 2> /dev/null	# to check options
+#   $ nohup ns0075 > ns0075.stdout 2> ns0075.stderr &
+#
+# DESCRIPTION
+#   This script reads paired-end or single-end Illumina FASTQ files
+#   and performs pre-process of the short sequences.
+#   Make a directry using a simple sample name
+#   and put unprocessed paired-end FASTQ files in it.
+#   The processed FASTQ files are saved in the seq directory.
+#
+# OPTIONS
+#   See below or type ns0075 -h 2> /dev/null in a command line.
+#
+# AUTHOR
+#   Coded by Kohji OKAMURA, Ph.D.
+#
+# HISTORY
+#   2016-03-23 Diverged from ns0101
+#   2016-04-06 Add option -f to handle *.fastq.gz in another directory
+#   2016-04-23 Count *_0.fastq only when $stage < 1
+#   2016-07-16 Change from chmod 400 to 444 for Windows users
+#   2017-03-13 Support other FASTQ file names, such as sample_1.fq.gz
+#   2017-03-14 Add option -c to process adapter-trimmed FASTQ (stage=2)
+#   2017-03-16 Add gzip process for *_2.fastq when -c provided
+#   2017-03-30 Print adapter name onto STDERR; add option -u to specify one
+#   2017-03-31 Fix a bug regarding sh -e operator
+#   2017-04-01 Fix a bug regarding the process of *_[12].fa files
+#   2017-04-03 Avoid sh error message when $optr == ''
+#   2017-04-05 Fix a bug missing a space in \( -s ${sample}_R1_0.fastq \)];
+#   2017-04-10 Fix a bug using $OPTRAG instead of $OPTARG
+#   2017-08-01 Employ cutadapt 1.14; Add option -i for single-end
+#   2017-08-17 Add -f option to gzip in order to process hard links
+#   2017-08-28 Add -g option not to stop the pipeline
+#   2017-08-29 Support input file names *_[12].f*q
+#   2017-09-06 Made some changes in documents
+#   2018-02-01 Assign a dummy $ad2 for single-end mode
+#   2018-06-07 Fix a bug regarding option -c and -g
+#   2018-10-30 Add option -o to omit counting bases
+#   2019-04-21 Add option -m to examine more reads; employ cutadapt 2.1
+#   2019-05-09 Make it run on both griffith and chase (cutadapt 1 and 2)
+#   2019-06-26 Employ cutadapt 2.3
+#   2019-11-14 Employ cutadapt 2.6
+
+export LANG=C
+gpfs=/net/gpfs
+hus4=/net/au34ib/HUS4
+biol=/opt/biol
+sample=$(basename $PWD)
+stage=0
+keep=0
+shortest=72
+qscore=16
+threshold=32
+erate=0.09
+single=0
+nadapter=0
+fastqdir=''
+optg=0
+optj=''
+optm=''
+opto=1
+optr=''
+optr1=''
+optr2=''
+optx=''
+optw=0
+opty=0
+optz=0
+
+while getopts "cf:ghijkm:op:q:r:s:t:u:wxyz" opt
+do
+  case $opt in
+    h )  echo 'Usage: ns0075 -g -p MB82651 -r 0.08 -s 36 -y
+         -c: process adapter-trimmed FASTQ
+         -f: specify a directory containing *.fastq.gz
+         -g: proceed unless the adapter can be determined
+         -h: print this help message
+         -i: process single-end FASTQ, but not paired-end one
+         -j: process non-Illumina FASTQ, such as SRA
+         -k: keep intermediate files (default: delete them)
+         -m: examine more reads for adapter detection (default: 1)
+         -o: omit counting bases (defulat: off)
+         -p: specify a sample name (defulat: basename $PWD)
+         -q: minimum quality score consided (defulat: 16)
+         -r: maximum allowed error rate in cutadapt (default: 0.09)
+         -s: minimal length in bp to be retained (default: 72)
+         -t: threshold value for ns0059 (default: 32)
+         -u: specify the adapter trimmed
+         -w: gzip seq/*_R[12]_4.fastq
+         -x: avoid checking read length (default: not avoid)
+         -y: gzip seq/*_R[12]_1.fastq
+         -z: gzip seq/*_R[12]_0.fastq'
+         exit ;;
+    c )  stage=2 ;;
+    f )  fastqdir=$OPTARG ;;
+    g )  optg=1 ;;
+    i )  single=1 ;;
+    j )  optj='-j' ;;
+    k )  keep=1 ;;
+    m )  optm="-m $OPTARG" ;;
+    o )  opto=0 ;;
+    p )  sample=$OPTARG ;;
+    q )  qscore=$OPTARG ;;
+    r )  erate=$OPTARG ;;
+    s )  shortest=$OPTARG ;;
+    t )  threshold=$OPTARG ;;
+    u )  optr=$OPTARG ;;
+    w )  optw=1 ;;
+    x )  optx='-x' ;;
+    y )  opty=1 ;;
+    z )  optz=1 ;;
+    * )  echo Unrecognized option detected 1>&2; exit 6 ;;
+  esac
+done
+
+rm -fr seq/	# remove old files and directories forcefully
+mkdir seq	# make a new directory to store files
+
+if [ -z $fastqdir ]; then
+  gzip -df *.f*q.gz
+else
+  for fastqgz in $fastqdir/*.f*q.gz
+  do
+    fastqn=`basename $fastqgz .gz`
+    gzip -dfc $fastqgz > $fastqn
+  done
+fi
+
+if [ \( -e ${sample}_R1_4.fastq \) -a \( -e ${sample}_R2_4.fastq \) ]; then
+  echo WARN: ${sample}_R[12]_4.fastq already exist 1>&2
+  echo WARN: ${sample}_R[12]_4.fastq are used 1>&2
+  mv ${sample}_R[12]_4.fastq seq/
+  stage=4
+  exit $stage
+elif [ \( -e ${sample}_R1_1.fastq \) -a \( -e ${sample}_R2_1.fastq \) ]; then
+  echo WARN: ${sample}_R[12]_1.fastq already exist 1>&2
+  echo WARN: ${sample}_R[12]_1.fastq are used 1>&2
+  mv ${sample}_R[12]_1.fastq seq/
+  stage=1
+elif [ \( -e ${sample}_R1_0.fastq \) -a \( -e ${sample}_R2_0.fastq \) ]; then
+  echo WARN: ${sample}_R[12]_0.fastq already exist 1>&2
+  echo WARN: ${sample}_R[12]_0.fastq are used 1>&2
+  mv ${sample}_R[12]_0.fastq seq/
+elif [ $single -eq 1 ]; then
+  cat *.f*q > seq/${sample}_R1_0.fastq
+  ln seq/${sample}_R1_0.fastq seq/${sample}_R2_0.fastq
+  optj='-j'
+else
+  cat *_R1*.fastq > seq/${sample}_R1_0.fastq
+  cat *_R2*.fastq > seq/${sample}_R2_0.fastq
+  if [ \( -e seq/${sample}_R1_0.fastq \) -a \
+       \( -s seq/${sample}_R1_0.fastq \) ]; then
+    :
+  else
+    cat *_1.f*q > seq/${sample}_R1_0.fastq
+    cat *_2.f*q > seq/${sample}_R2_0.fastq
+  fi
+fi
+if [ $stage -eq 2 ]; then
+  ln seq/${sample}_R1_0.fastq seq/${sample}_R1_2.fastq
+  ln seq/${sample}_R2_0.fastq seq/${sample}_R2_2.fastq
+fi
+cd seq/
+
+## Check FASTQ
+export PATH=$biol/NGS:$biol/GrepWalk:$PATH
+if [ $stage -lt 1 ]; then
+  ls -l --time-style=long-iso ${sample}_R1_0.fastq
+  if [ $opto -eq 1 ]; then
+    grepwalk -u -q $qscore -f ${sample}_R1_0.fastq
+  fi
+  ls -l --time-style=long-iso ${sample}_R2_0.fastq
+  if [ $opto -eq 1 ]; then
+    grepwalk -u -q $qscore -f ${sample}_R2_0.fastq
+  fi
+  ns0064 -a ${sample}_R1_0.fastq -b ${sample}_R2_0.fastq \
+         -c ${sample}_R1_1.fastq -d ${sample}_R2_1.fastq $optj $optx
+  if [ $? -ne 0 ]; then
+    echo FASTQ format error $? 1>&2
+    exit 2
+  fi
+fi
+if [ $stage -lt 2 ]; then
+  ls -l --time-style=long-iso ${sample}_R1_1.fastq
+  if [ $opto -eq 1 ]; then
+    grepwalk -u -q $qscore -f ${sample}_R1_1.fastq
+  fi
+  ls -l --time-style=long-iso ${sample}_R2_1.fastq
+  if [ $opto -eq 1 ]; then
+    grepwalk -u -q $qscore -f ${sample}_R2_1.fastq
+  fi
+fi
+
+#### cutadapt
+if [ -z $optr ]; then
+  :
+elif [ \( $optr == '1' \) -o \( $optr == '2' \) ]; then
+  optr1='-r 1'; optr2='-r 2'
+elif [ $optr == '3' ]; then
+  optr1='-r 3'; optr2='-r 3'
+elif [ \( $optr == '5' \) -o \( $optr == '6' \) ]; then
+  optr1='-r 5'; optr2='-r 6'
+fi
+if [ $stage -lt 2 ]; then
+  export PATH=$gpfs/opt/anaconda3/bin:$biol/cutadapt-2.6:$PATH
+  ns0059 $optr1 -t $threshold $optm -f ${sample}_R1_1.fastq
+  adapter=$?
+  if [ $adapter -eq 1 ]; then
+    ad1=AGATCGGAAGAGCACACGT	# Illumina TruSeq R1
+    echo '+++ ns0075: Illumina TruSeq R1' 1>&2
+  elif [ $adapter -eq 3 ]; then
+    ad1=CTGTCTCTTATACACATCT	# Illumina Nextera R[12]
+    echo '+++ ns0075: Illumina Nextera R[12]' 1>&2
+  elif [ $adapter -eq 5 ]; then
+    ad1=CTGTCTCTTGATCACATCT	# Agilent QXT R1
+    echo '+++ ns0075: Agilent QXT R1' 1>&2
+  elif [ $optg -eq 1 ]; then
+    echo WARN: adapter cannot be detected in ${sample}_R1_1.fastq 1>&2
+    nadapter=1
+  else
+    echo Error: adapter cannot be detected in ${sample}_R1_1.fastq 1>&2
+    exit 3
+  fi
+  ns0059 $optr2 -t $threshold $optm -f ${sample}_R2_1.fastq
+  adapter=$?
+  if [ $adapter -eq 2 ]; then
+    ad2=AGATCGGAAGAGCGTCGTG	# Illumina TruSeq R2
+    echo '+++ ns0075: Illumina TruSeq R2' 1>&2
+  elif [ $adapter -eq 1 -a $single -eq 1 ]; then
+    ad2=AGATCGGAAGAGCACACGT	# Illumina TruSeq R1 (dummy)
+  elif [ $adapter -eq 3 ]; then
+    ad2=CTGTCTCTTATACACATCT	# Illumina Nextera R[12]
+    echo '+++ ns0075: Illumina Nextera R[12]' 1>&2
+  elif [ $adapter -eq 6 ]; then
+    ad2=CTGTCTCTTGATCACAAGT	# Agilent QXT R2
+    echo '+++ ns0075: Agilent QXT R2' 1>&2
+  elif [ $adapter -eq 5 -a $single -eq 1 ]; then
+    ad2=CTGTCTCTTGATCACATCT	# Agilent QXT R1 (dummy)
+  elif [ $optg -eq 1 ]; then
+    echo WARN: adapter cannot be detected in ${sample}_R2_1.fastq 1>&2
+    nadapter=1
+  else
+    echo Error: adapter cannot be detected in ${sample}_R2_1.fastq 1>&2
+    exit 5
+  fi
+  if [ \( $stage -eq 2 \) \
+       -o \( \( $optg -eq 1 \) -a \( $nadapter -eq 1 \) \) ]; then
+    ln ${sample}_R1_1.fastq ${sample}_R1_2.fastq
+    ln ${sample}_R2_1.fastq ${sample}_R2_2.fastq
+  else
+    cutadapt -a $ad1 -e $erate -o ${sample}_R1_2.fastq \
+      ${sample}_R1_1.fastq >  ${sample}.cutadapt
+    cutadapt -a $ad2 -e $erate -o ${sample}_R2_2.fastq \
+      ${sample}_R2_1.fastq >> ${sample}.cutadapt
+  fi
+fi
+ls -l --time-style=long-iso ${sample}_R1_2.fastq
+if [ $opto -eq 1 ]; then
+  grepwalk -u -q $qscore -f ${sample}_R1_2.fastq
+fi
+ls -l --time-style=long-iso ${sample}_R2_2.fastq
+if [ $opto -eq 1 ]; then
+  grepwalk -u -q $qscore -f ${sample}_R2_2.fastq
+fi
+
+#### trim low quality bases at both ends
+grepwalk -t -q $qscore -p -f ${sample}_R1_2.fastq > ${sample}_R1_3.fastq
+grepwalk -t -q $qscore -p -f ${sample}_R2_2.fastq > ${sample}_R2_3.fastq
+if [ $stage -eq 2 ]; then
+  chmod 444 ${sample}_R[12]_2.fastq
+  gzip -f ${sample}_R[12]_2.fastq
+fi
+if [ $keep -eq 0 ]; then
+  rm -f ${sample}_R[12]_2.fastq
+fi
+ls -l --time-style=long-iso ${sample}_R1_3.fastq
+if [ $opto -eq 1 ]; then
+  grepwalk -u -q $qscore -f ${sample}_R1_3.fastq
+fi
+ls -l --time-style=long-iso ${sample}_R2_3.fastq
+if [ $opto -eq 1 ]; then
+  grepwalk -u -q $qscore -f ${sample}_R2_3.fastq
+fi
+
+#### select final pairs
+ns0018 -l $shortest -a ${sample}_R1_3.fastq -b ${sample}_R2_3.fastq \
+                    -c ${sample}_R1_4.fastq -d ${sample}_R2_4.fastq
+if [ $keep -eq 0 ]; then
+  rm -f ${sample}_R[12]_3.fastq
+fi
+ls -l --time-style=long-iso ${sample}_R1_4.fastq
+if [ $opto -eq 1 ]; then
+  grepwalk -u -q $qscore -f ${sample}_R1_4.fastq
+fi
+ls -l --time-style=long-iso ${sample}_R2_4.fastq
+if [ $opto -eq 1 ]; then
+  grepwalk -u -q $qscore -f ${sample}_R2_4.fastq
+fi
+
+#### gzip FASTQ files
+if [ $single -eq 1 ]; then
+  rm -f ${sample}_R2_*.fastq
+fi
+if [ $optw -eq 1 ]; then
+  chmod 444 ${sample}_R[12]_4.fastq
+  gzip -f ${sample}_R[12]_4.fastq
+fi
+if [ $opty -eq 1 ]; then
+  chmod 444 ${sample}_R[12]_1.fastq
+  gzip -f ${sample}_R[12]_1.fastq
+fi
+if [ $optz -eq 1 ]; then
+  chmod 444 ${sample}_R[12]_0.fastq
+  gzip -f ${sample}_R[12]_0.fastq
+fi
+
+cd ../
+exit
